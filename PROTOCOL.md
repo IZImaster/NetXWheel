@@ -111,6 +111,9 @@ Every server answers with **ANNOUNCE** to the address the DISCOVER came from:
 | `in_use`, `in_use_by` | a game has it, and the name that game gave |
 | `connected` | `false` if the wheel is unplugged right now (missing means true) |
 
+A server answers each address at most **4 DISCOVERs a second** and ignores the rest, so it can't be
+used to flood a third device with answers (ANNOUNCE is bigger than DISCOVER).
+
 The full description of a wheel (button names, extra axes) comes in ACCEPT (see 8), to keep ANNOUNCE
 small. The game shows the servers and their wheels, and the player picks one.
 
@@ -128,7 +131,7 @@ small. The game shows the servers and their wheels, and the player picks one.
 
 ```json
 {"nonce": "d03b...(32 hex)", "salt": "51e0...(32 hex)", "iterations": 20000,
- "server_password": true, "wheel_password": false}
+ "server_password": true, "wheel_password": false, "client_nonce": "9a41..."}
 ```
 
 `salt` stays the same for this server (it changes only when a password changes); `nonce` is new
@@ -152,11 +155,21 @@ every time. The game asks the player for the passwords that are `true` (or uses 
 
 The header's `session` field carries the same number from here on.
 
+The game **must check ACCEPT's signature** with the session key it worked out (see 5) and drop an
+ACCEPT that doesn't match. With a password set, that proves the answer comes from the real server:
+a device pretending to be the server can't sign it without knowing the password. Without any
+password, any device could pretend to be the server; the game should say so to the player (for
+example "no password: not checked") and remember the `server_id` it used before.
+
 **4b. REJECT**:
 
 ```json
-{"reason": "in_use", "message": "Wheel 1 is being used by Quest 3 (192.168.1.20)"}
+{"reason": "in_use", "message": "Wheel 1 is being used by Quest 3 (192.168.1.20)", "client_nonce": "9a41..."}
 ```
+
+`client_nonce` repeats the one from the CONNECT being answered. The game **ignores a REJECT (and a
+CHALLENGE) whose `client_nonce` isn't the one it just sent**, so a device that sends fake rejections
+can't stop it connecting. CHALLENGE carries `client_nonce` the same way.
 
 | reason | |
 |---|---|
@@ -191,9 +204,14 @@ packet whose `seq` is not higher than the highest it has accepted (so old or rep
 are ignored; a lost packet just leaves a gap).
 
 What this protects: other games and devices on the network can't use a wheel without the
-password, take over a session, or inject forces into one. What it doesn't: the wheel's data
-isn't encrypted (others on the network could read it), and it isn't meant for use over the
-internet.
+password, take over a session, inject forces or fake the wheel's controls (every live packet is
+signed), replay old packets, block a connection with fake rejections (4), or, with a password,
+pretend to be the server (4).
+
+What it doesn't: the wheel's data isn't **encrypted**, so others on the network could read it
+(where the wheel points, which buttons are pressed). Nobody can *change* it, though. Nothing can
+stop someone **flooding** the network or jamming the Wi-Fi. It isn't meant for use over the internet.
+Encryption could be added later as an option (a new capability, see 9) without breaking anything.
 
 ## 6. Driving: STATE and FORCES
 
