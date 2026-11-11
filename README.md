@@ -20,8 +20,8 @@ The game sends back the forces (steering weight, bumps, ABS) and the server play
   until the game leaves.
 
 **Games that support it:** GT3 Revisited on Meta Quest and PC,
-in [this fork](https://github.com/IZImaster/GT3-revisited-Steering-Wheel-FFB/tree/netwheel) (being updated to
-protocol version 1).
+in [this fork](https://github.com/IZImaster/GT3-revisited-Steering-Wheel-FFB/tree/netxwheel-v1):
+Home > Network wheel.
 Want it in your game? See [For game developers](#for-game-developers).
 
 ## What you need
@@ -136,8 +136,9 @@ the box; some Thrustmaster and Fanatec models need an extra driver on Linux.
 servers and connect, compact binary ones while driving.
 Your game shows the network wheel as a normal wheel (for example an SDL virtual joystick) and sends
 its forces back. [netxwheel/client.py](netxwheel/client.py) is a complete client in about 150 lines of
-Python to read alongside the spec; `netxwheel test` shows everything from the game's side. A C++ client
-(GT3 Revisited's) will be in [clients/](clients/).
+Python to read alongside the spec; `netxwheel test` shows everything from the game's side.
+[clients/gt3-revisited](clients/gt3-revisited) is GT3 Revisited's client in C++ (sockets, no SDL) plus
+its SDL virtual wheel.
 
 ## Troubleshooting
 
