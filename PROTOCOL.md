@@ -4,7 +4,7 @@ A game (the **client**) uses steering wheels plugged into another machine (the *
 local network. One server can have several wheels of different makes; one network can have several
 servers; several games can each use their own wheel at the same time.
 
-Status: **draft**, to be frozen with NetXWheel 1.0. (The earlier `GT3W` prototype protocol, used
+Status: **implemented** by the NetXWheel 1.0 server; frozen once the first game supports it. (The earlier `GT3W` prototype protocol, used
 only during development with GT3 Revisited, is not part of NetXWheel 1.0.)
 
 ## Contents
@@ -107,7 +107,7 @@ Every server answers with **ANNOUNCE** to the address the DISCOVER came from:
 | `ffb` | it can play forces |
 | `direct_drive`, `torque_nm` | from its profile (`torque_nm` may be missing if unknown) |
 | `pedals` | which of throttle, brake, clutch, handbrake it has |
-| `shifter` | `none`, `h6r` (H-shifter 1-6 and reverse), `h7r`, `sequential` |
+| `shifter` | `none`, `h6r` (H-shifter 1-6 and reverse), `h7r`, `h6` / `h7` (no reverse), `sequential` |
 | `password` | this wheel needs its own password too |
 | `in_use`, `in_use_by` | a game has it, and the name that game gave |
 | `connected` | `false` if the wheel is unplugged right now (missing means true) |
@@ -287,7 +287,7 @@ Sent in ACCEPT (and NOTICE "changed"). Everything in the ANNOUNCE wheel entry, p
     {"bit": 32, "role": "extra1", "label": "Dial +"}
   ],
   "dpad": true,
-  "extra_axes": [{"role": "dial", "label": "Brake bias"}]
+  "extra_axes": [{"role": "axis_extra1", "label": "Brake bias"}]
 }
 ```
 
@@ -335,5 +335,5 @@ game                                        server "Living room Pi"
  | BYE  ----------------------------------->  |   the wheel is free again
 ```
 
-Example code: [clients/](clients/) (a game client in C++) and [netxwheel/testclient.py](netxwheel/testclient.py)
-(Python), once this version is built.
+Example code: [netxwheel/client.py](netxwheel/client.py), a whole client in Python (about 150 lines),
+and [netxwheel/testclient.py](netxwheel/testclient.py), which uses it. `netxwheel test` runs it.

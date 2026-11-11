@@ -1,5 +1,9 @@
 # Client example: GT3 Revisited (C++, SDL3)
 
+> **Note:** this copy still speaks the 0.1 prototype protocol (GT3W). It is being updated to protocol
+> version 1; until then, read it for the structure (virtual SDL wheel, sockets) and
+> [netxwheel/client.py](../../netxwheel/client.py) for the protocol itself.
+
 `net_wheel.h` and `net_wheel.cpp` are the NetXWheel client from GT3 Revisited
 ([its fork with the network wheel](https://github.com/IZImaster/GT3-revisited-Steering-Wheel-FFB/tree/netwheel),
 files `src/input/net_wheel.*`). Copied here as a reference for adding NetXWheel to another game.

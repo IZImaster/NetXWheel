@@ -14,13 +14,19 @@ SERVICE = "netxwheel"
 
 HELP = """NetXWheel %s - a steering wheel over the network
 
-Wheel (the server must be running):
-  netxwheel status            where the wheel is, whether a game is connected
+Wheels (the server must be running). N is the wheel's number from netxwheel status (default 1):
+  netxwheel status            the wheels, where they are, which game uses them
   netxwheel watch             the same, live, until Ctrl+C
-  netxwheel center            hold the wheel straight first: saves that as straight ahead
-  netxwheel reset             back to the wheel's own centre
-  netxwheel buzz [strength]   vibrate the wheel for 2 seconds (strength 0.05 .. 1.0, default 0.5)
-  netxwheel info              which wheel, profile and rotation the server uses
+  netxwheel center [N]        hold the wheel straight first: saves that as straight ahead
+  netxwheel reset [N]         back to the wheel's own centre
+  netxwheel buzz [N] [0.5]    vibrate a free wheel for 2 seconds (strength 0.05 .. 1.0)
+  netxwheel kick [N]          end the game's session on a wheel (it is free again)
+  netxwheel info              everything the server tells games, and each wheel's profile
+
+Name and passwords:
+  netxwheel name "Living room Pi"       this server's name in games' lists
+  netxwheel password server SECRET      a password for the whole server (off: none)
+  netxwheel password wheel N SECRET     a password for one wheel too (off: none)
 
 Settings (they apply at once, no restart):
   netxwheel settings          show all settings and what they do
@@ -51,7 +57,7 @@ def ask_server(text, timeout=1.0):
     sock.settimeout(timeout)
     try:
         sock.sendto(P.CMD_MAGIC + text.encode(), ("127.0.0.1", port))
-        return sock.recvfrom(2048)[0].decode(errors="replace")
+        return sock.recvfrom(8192)[0].decode(errors="replace")
     except (socket.timeout, ConnectionResetError, OSError):
         hint = "netxwheel start" if LINUX else "windows\\start.bat"
         return "no answer from the server: is it running? (start it with: %s)" % hint
@@ -65,25 +71,66 @@ def show_settings():
     print()
     values = S.read()
     for name, default, comment in S.DEFAULTS:
-        mark = "" if values[name] == default else "   (default %s)" % default
-        print("  %-15s %-8s %s%s" % (name, values[name], comment, mark))
+        v = values[name]
+        if name in S.SECRET:
+            v = "(set)" if v else "(none)"
+        elif name in S.TEXT:
+            v = '"%s"' % v
+        mark = "" if values[name] == default or name in S.SECRET else "   (default %s)" % (default or '""')
+        print("  %-15s %-8s %s%s" % (name, v, comment, mark))
     print()
     print("Change one with: netxwheel set NAME VALUE")
 
 
 def set_setting(args):
-    if len(args) != 2:
+    if len(args) < 2:
         print("usage: netxwheel set NAME VALUE   (netxwheel settings lists them)")
         return 2
     try:
-        value = S.write(args[0], args[1])
+        value = S.write(args[0], " ".join(args[1:]))
     except ValueError as e:
         print("not changed:", e)
         return 2
-    print("%s = %s (the server uses it within a second)" % (args[0], value))
-    if args[0] in ("port", "profile"):
+    shown = "(set)" if args[0] in S.SECRET else value
+    print("%s = %s (the server uses it within a second)" % (args[0], shown))
+    if args[0] == "port":
         print("this one needs a restart: netxwheel restart")
     return 0
+
+
+def set_name(args):
+    if not args:
+        print('usage: netxwheel name "Living room Pi"')
+        return 2
+    return set_setting(["name"] + args)
+
+
+def set_password(args):
+    usage = "usage: netxwheel password server SECRET|off   or   netxwheel password wheel N SECRET|off"
+    if len(args) >= 2 and args[0] == "server":
+        pw = "" if args[1] == "off" else " ".join(args[1:])
+        try:
+            S.write("server_password", pw)
+        except ValueError as e:
+            print("not changed:", e)
+            return 2
+        print("server password %s" % ("removed" if not pw else "set"))
+        return 0
+    if len(args) >= 3 and args[0] == "wheel" and args[1].isdigit():
+        reply = ask_server("uid %s" % args[1])
+        if reply.startswith("no ") or "\n" not in reply:
+            print(reply)
+            return 1
+        uid, name = reply.split("\n", 1)
+        pw = "" if args[2] == "off" else " ".join(args[2:])
+        if '"' in pw or len(pw) > 64:
+            print("not changed: at most 64 characters, no quotes")
+            return 2
+        S.write_wheel(uid, "password", pw, name)
+        print("wheel %s (%s): password %s" % (args[1], name, "removed" if not pw else "set"))
+        return 0
+    print(usage)
+    return 2
 
 
 def list_profiles():
@@ -150,10 +197,15 @@ def update():
 
 
 def watch():
+    shown = 0
     try:
         while True:
-            line = ask_server("status", 0.5)
-            print("\r" + line[:150].ljust(150), end="", flush=True)
+            lines = ask_server("status", 0.5).split("\n")
+            if shown:
+                print("\033[%dA" % shown, end="")          # back up over the last lines
+            for line in lines:
+                print("\r" + line[:150].ljust(150))
+            shown = len(lines)
             time.sleep(0.1)
     except KeyboardInterrupt:
         print()
@@ -164,10 +216,19 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     cmd = argv[0] if argv else "help"
     args = argv[1:]
-    if cmd in ("status", "center", "reset", "info"):
-        print(ask_server(cmd))
+    if cmd in ("status", "info", "wheels"):
+        print(ask_server("status" if cmd == "wheels" else cmd))
+    elif cmd in ("center", "reset", "kick"):
+        print(ask_server(" ".join([cmd] + args[:1])))
     elif cmd == "buzz":
-        print(ask_server(" ".join(["buzz"] + args[:1])))
+        # netxwheel buzz [N] [strength]: a whole number is the wheel, a number with a point the strength
+        wheel = next((a for a in args if a.isdigit()), "1")
+        level = next((a for a in args if "." in a), "0.5")
+        print(ask_server("buzz %s %s" % (wheel, level)))
+    elif cmd == "name":
+        return set_name(args)
+    elif cmd == "password":
+        return set_password(args)
     elif cmd == "watch":
         return watch()
     elif cmd == "settings":

@@ -1,13 +1,15 @@
-"""Linux backend: reads the wheel and plays forces through evdev (python3-evdev)."""
+"""Linux backend: reads wheels and plays forces through evdev (python3-evdev)."""
 import errno
 
 from evdev import InputDevice, ecodes, ff, list_devices
 
 from . import protocol as P
-from .profiles import AXIS_ROLES, ALL_BUTTON_ROLES, choose
-from .state import WheelState, axis_centered, pedal
+from . import settings as S
+from .profiles import AXIS_ROLES, ALL_BUTTON_ROLES, EXTRA_AXES, choose
+from .state import WheelState, axis_centered, axis_unit, pedal
 
 NAME = "Linux evdev"
+KIND = "linux"
 
 
 def code(value, kind):
@@ -47,84 +49,120 @@ def _looks_like_wheel(dev, caps):
     return has_force or any(w in name for w in ("wheel", "racing", "steering", "driving"))
 
 
-def open_wheel(cfg, all_profiles):
-    """The wheel to use and its profile: one matching a profile first, else anything wheel-like."""
-    devices = []
+def uid_of(dev):
+    """Identifies a wheel across unplugging: its name and where it is plugged in (or its serial)."""
+    return "%s@%s" % (dev.name, dev.uniq or dev.phys or dev.path)
+
+
+def open_new(cfg, all_profiles, open_uids):
+    """Every wheel not open yet: a list of wheels (each with .uid and .profile)."""
+    found = []
     for path in list_devices():
         try:
-            devices.append(InputDevice(path))
+            d = InputDevice(path)
         except OSError:
-            pass
-    chosen = profile = None
-    wanted = cfg.profile if cfg.profile != "auto" else None
-    for d in devices:                      # 1. a device a profile names
-        p = choose(d.name, cfg.profile, all_profiles)
-        if p.id == "generic" or "linux" not in p.sections:
             continue
-        if p.matches(d.name) or (wanted == p.id and _looks_like_wheel(d, _caps(d))):
-            chosen, profile = d, p
-            break
-    if chosen is None:                     # 2. anything that looks like a wheel
-        for d in devices:
-            if _looks_like_wheel(d, _caps(d)):
-                chosen, profile = d, choose(d.name, "auto", [])
-                break
-    for d in devices:
-        if d is not chosen:
+        uid = uid_of(d)
+        if uid in open_uids or any(w.uid == uid for w in found):
             d.close()
-    if chosen is None:
-        return None, None
-    return EvdevWheel(chosen, profile), profile
+            continue
+        wanted = S.wheel(uid).get("profile") or "auto"
+        p = choose(d.name, wanted, all_profiles)
+        is_wheel = (p.id != "generic" and "linux" in p.sections and (p.matches(d.name) or wanted == p.id)) \
+            or _looks_like_wheel(d, _caps(d))
+        if not is_wheel:
+            d.close()
+            continue
+        if "linux" not in p.sections:
+            p = choose(d.name, "auto", [])           # generic
+        try:
+            found.append(EvdevWheel(d, p, uid))
+        except (OSError, ValueError) as e:
+            print("could not use %s: %s" % (d.name, e), flush=True)
+            d.close()
+    return found
 
 
 class EvdevWheel:
     name = NAME
 
-    def __init__(self, dev, profile):
+    def __init__(self, dev, profile, uid):
         self.dev = dev
+        self.uid = uid
+        self.profile = profile
         self.device_name = dev.name
-        self.state = WheelState()
         caps = _caps(dev)
         m = profile.platform("linux")
+        self.labels = {k[6:]: v for k, v in m.items() if k.startswith("label_")}
         # axes
         self.axes = {}                                     # code -> (role, lo, hi, rest_high)
         rest = m.get("pedals_rest", "auto")
         absc = _abs_codes(caps)
-        for role in AXIS_ROLES:
+        self.extra_labels = []
+        for role in AXIS_ROLES + EXTRA_AXES:
             c = code(m.get(role, ""), "axis")
             if c is None or c not in absc:
                 continue
             info = dev.absinfo(c)
             lo, hi = info.min, info.max
-            rest_high = rest == "high" or (rest == "auto" and role != "steering" and info.value > (lo + hi) / 2)
+            pedal_like = role in AXIS_ROLES and role != "steering"
+            rest_high = pedal_like and (rest == "high" or (rest == "auto" and info.value > (lo + hi) / 2))
+            if role in EXTRA_AXES:
+                self.extra_labels.append(m.get(role + "_label", "Axis %s" % role[len("axis_extra"):]))
+                role = ("extra", len(self.extra_labels) - 1)
             self.axes[c] = (role, lo, hi, rest_high)
-            self._axis(c, info.value)
+        self.state = WheelState(len(self.extra_labels))
+        for c in self.axes:
+            self._axis(c, dev.absinfo(c).value)
         hat = (m.get("hat") or "ABS_HAT0X ABS_HAT0Y").split()
         self.hat_x = code(hat[0], "axis") if hat else None
         self.hat_y = code(hat[1], "axis") if len(hat) > 1 else None
+        self.hat_v = [0, 0]
+        self.has_hat = self.hat_x in absc
         # buttons
         self.keys = {}                                     # code -> role
         if m.get("buttons") == "in_order":
-            roles = P.IN_ORDER_ROLES
-            for i, c in enumerate(sorted(caps.get(ecodes.EV_KEY, []))[:len(P.IN_ORDER_ROLES)]):
-                self.keys[c] = roles[i]
+            for i, c in enumerate(sorted(caps.get(ecodes.EV_KEY, []))[:len(P.IN_ORDER)]):
+                self.keys[c] = P.IN_ORDER[i]
         for role in ALL_BUTTON_ROLES:
             if role in m:
                 c = code(m[role], "button")
                 if c is not None:
                     self.keys[c] = role
-        self.has_shifter = any(r in P.GEAR_ROLES for r in self.keys.values())
+        # force feedback
         ffc = caps.get(ecodes.EV_FF, [])
-        self.has_ffb = ecodes.FF_CONSTANT in ffc or ecodes.FF_SPRING in ffc
         self.supported = {"spring": ecodes.FF_SPRING in ffc, "const": ecodes.FF_CONSTANT in ffc,
+                          "damper": ecodes.FF_DAMPER in ffc, "friction": ecodes.FF_FRICTION in ffc,
                           "vib": ecodes.FF_PERIODIC in ffc}
-        self.ids = {"spring": None, "const": None, "vib": None}
-        self.last = {"spring": None, "const": None, "vib": None}
+        self.has_ffb = self.supported["const"] or self.supported["spring"]
+        self.ids = {k: None for k in self.supported}
+        self.last = {k: None for k in self.supported}
         if self.has_ffb:
             try:
                 dev.write(ecodes.EV_FF, ecodes.FF_AUTOCENTER, 0)
             except OSError:
                 pass
+
+    # ------------------------------------------------------------ what it has
+    def describe(self):
+        roles = set(self.keys.values())
+        axes = [a[0] for a in self.axes.values()]
+        gears = [r for r in roles if r in P.GEARS and r != "reverse"]
+        if "shift_up" in roles and "shift_down" in roles and not gears:
+            shifter = "sequential"
+        elif gears:
+            shifter = "h%dr" % max(int(g[4:]) for g in gears) if "reverse" in roles else "h%d" % len(gears)
+        else:
+            shifter = "none"
+        forces = [n for n, k in (("constant", "const"), ("spring", "spring"), ("damper", "damper"),
+                                 ("friction", "friction"), ("rumble", "vib")) if self.supported[k]]
+        buttons = sorted(({"bit": P.BUTTONS[r][0], "role": r, "label": self.labels.get(r, P.BUTTONS[r][1])}
+                          for r in roles if r in P.BUTTONS), key=lambda b: b["bit"])
+        return {"pedals": [r for r in ("throttle", "brake", "clutch", "handbrake") if r in axes],
+                "shifter": shifter, "forces": forces, "ffb": self.has_ffb, "buttons": buttons,
+                "dpad": self.has_hat or any(r in P.DPAD for r in roles),
+                "extra_axes": [{"role": "axis_extra%d" % (i + 1), "label": lab}
+                               for i, lab in enumerate(self.extra_labels)]}
 
     # ------------------------------------------------------------ input
     def fileno(self):
@@ -132,10 +170,13 @@ class EvdevWheel:
 
     def _axis(self, c, value):
         role, lo, hi, rest_high = self.axes[c]
+        st = self.state
         if role == "steering":
-            self.state.steer = axis_centered(value, lo, hi)
+            st.steer = axis_centered(value, lo, hi)
+        elif isinstance(role, tuple):
+            st.extra[role[1]] = axis_unit(value, lo, hi)
         else:
-            setattr(self.state, role, pedal(value, lo, hi, rest_high))
+            setattr(st, role, pedal(value, lo, hi, rest_high))
 
     def poll(self):
         try:
@@ -146,10 +187,9 @@ class EvdevWheel:
             if e.type == ecodes.EV_ABS:
                 if e.code in self.axes:
                     self._axis(e.code, e.value)
-                elif e.code == self.hat_x:
-                    self.state.hat_x = max(-1, min(1, e.value))
-                elif e.code == self.hat_y:
-                    self.state.hat_y = max(-1, min(1, e.value))
+                elif e.code == self.hat_x or e.code == self.hat_y:
+                    self.hat_v[0 if e.code == self.hat_x else 1] = max(-1, min(1, e.value))
+                    self.state.set_hat(*self.hat_v)
             elif e.type == ecodes.EV_KEY and e.code in self.keys:
                 self.state.set_role(self.keys[e.code], e.value != 0)
 
@@ -167,7 +207,7 @@ class EvdevWheel:
         except OSError as e:
             if e.errno in (errno.ENODEV, errno.EIO):
                 raise
-            print("this wheel refused the %s effect (%s); playing without it" % (name, e), flush=True)
+            print("%s refused the %s effect (%s); playing without it" % (self.device_name, name, e), flush=True)
             self.supported[name] = False
             return
         if self.ids[name] is None:
@@ -190,31 +230,31 @@ class EvdevWheel:
             self._stop_one(name)
 
     def refresh_forces(self):
-        """Send every force again at the next update (the centre or settings changed)."""
         for name in self.last:
             self.last[name] = None
 
-    def set_forces(self, spring, center, push, vib):
-        """spring 0..1, center -1..1 (spring's centre), push -1..1 (positive turns right), vib 0..1."""
+    def _condition(self, name, etype, coef, center=0):
+        key = (coef, center)
+        if key == self.last[name]:
+            return
+        if coef > 0:
+            c = ff.Condition(0x7FFF, 0x7FFF, coef, coef, 0, center)
+            self._play(name, ff.Effect(etype, -1, 0, ff.Trigger(0, 0), ff.Replay(0, 0),
+                                       ff.EffectType(ff_condition_effect=(c, c))))
+        else:
+            self._stop_one(name)
+        self.last[name] = key
+
+    def set_forces(self, constant, spring, center, damper, friction, rumble, period_ms):
+        """constant -1..1 (positive turns right), spring/damper/friction/rumble 0..1,
+        center -1..1 of the wheel's own rotation, period_ms of the vibration."""
         if not self.has_ffb:
             return
-        coef = int(spring * 32767)
-        center_ff = int(max(-1.0, min(1.0, center)) * 32767)
+        self._condition("spring", ecodes.FF_SPRING, int(spring * 32767), int(max(-1.0, min(1.0, center)) * 32767))
+        self._condition("damper", ecodes.FF_DAMPER, int(damper * 32767))
+        self._condition("friction", ecodes.FF_FRICTION, int(friction * 32767))
         # The kernel's direction 0x4000 pushes left for a positive level, so the sign is flipped.
-        level = int(-push * 32767)
-        mag = int(vib * 32767)
-
-        key = (coef, center_ff)
-        if key != self.last["spring"]:
-            if coef > 0:
-                c = ff.Condition(0x7FFF, 0x7FFF, coef, coef, 0, center_ff)
-                self._play("spring", ff.Effect(
-                    ecodes.FF_SPRING, -1, 0, ff.Trigger(0, 0), ff.Replay(0, 0),
-                    ff.EffectType(ff_condition_effect=(c, c))))
-            else:
-                self._stop_one("spring")
-            self.last["spring"] = key
-
+        level = int(-constant * 32767)
         if level != self.last["const"]:
             if level != 0:
                 self._play("const", ff.Effect(
@@ -223,16 +263,17 @@ class EvdevWheel:
             else:
                 self._stop_one("const")
             self.last["const"] = level
-
-        if mag != self.last["vib"]:
+        mag = int(rumble * 32767)
+        key = (mag, int(period_ms))
+        if key != self.last["vib"]:
             if mag > 300:
                 self._play("vib", ff.Effect(
                     ecodes.FF_PERIODIC, -1, 0x4000, ff.Trigger(0, 0), ff.Replay(0, 0),
                     ff.EffectType(ff_periodic_effect=ff.Periodic(
-                        ecodes.FF_SINE, 40, mag, 0, 0, ff.Envelope(0, 0, 0, 0), 0, None))))
+                        ecodes.FF_SINE, int(period_ms), mag, 0, 0, ff.Envelope(0, 0, 0, 0), 0, None))))
             else:
                 self._stop_one("vib")
-            self.last["vib"] = mag
+            self.last["vib"] = key
 
     def close(self):
         try:
@@ -242,7 +283,7 @@ class EvdevWheel:
 
 
 def list_wheels():
-    """(path, name, looks like a wheel) for every input device: for netxwheel make-profile."""
+    """(path, name, looks like a wheel) for every input device: for netxwheel devices / make-profile."""
     out = []
     for path in list_devices():
         try:

@@ -1,4 +1,4 @@
-"""Windows (and macOS/Linux, if asked) backend: the wheel and its forces through SDL2 (pysdl2).
+"""Windows (and macOS/Linux, if asked) backend: wheels and their forces through SDL2 (pysdl2).
 
 Install:  pip install pysdl2 pysdl2-dll
 The effects are built like GT3 Revisited's own wheel code: on the steering axis, one infinite play.
@@ -11,11 +11,14 @@ except ImportError as e:  # pragma: no cover - depends on the machine
     raise SystemExit("NetXWheel needs pysdl2 on this system: pip install pysdl2 pysdl2-dll (%s)" % e)
 
 from . import protocol as P
-from .profiles import AXIS_ROLES, ALL_BUTTON_ROLES, choose
-from .state import WheelState, axis_centered, pedal
+from . import settings as S
+from .profiles import AXIS_ROLES, ALL_BUTTON_ROLES, EXTRA_AXES, choose
+from .state import WheelState, axis_centered, axis_unit, pedal
 
 NAME = "SDL"
+KIND = "windows"
 _ready = False
+_open_instances = set()
 
 
 def _init():
@@ -25,7 +28,7 @@ def _init():
     sdl2.SDL_SetHint(sdl2.SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, b"1")
     if sdl2.SDL_Init(sdl2.SDL_INIT_JOYSTICK | sdl2.SDL_INIT_HAPTIC) != 0:
         raise SystemExit("SDL could not start: %s" % sdl2.SDL_GetError().decode(errors="replace"))
-    sdl2.SDL_JoystickEventState(sdl2.SDL_IGNORE)   # read the wheel directly, no event queue
+    sdl2.SDL_JoystickEventState(sdl2.SDL_IGNORE)   # read the wheels directly, no event queue
     _ready = True
 
 
@@ -51,29 +54,47 @@ def _looks_like_wheel(i, name):
     return any(w in n for w in ("wheel", "racing", "steering", "driving", "g920", "g29", "g923"))
 
 
-def open_wheel(cfg, all_profiles):
+def _uid(joy, name, taken):
+    serial = None
+    try:
+        s = sdl2.SDL_JoystickGetSerial(joy)
+        serial = s.decode(errors="replace") if s else None
+    except AttributeError:
+        pass
+    if serial:
+        return "%s@%s" % (name, serial)
+    base = "%s@sdl" % name
+    uid, n = base, 1
+    while uid in taken:            # two of the same model without serials: number them
+        n += 1
+        uid = "%s#%d" % (base, n)
+    return uid
+
+
+def open_new(cfg, all_profiles, open_uids):
     _init()
     sdl2.SDL_JoystickUpdate()
-    count = sdl2.SDL_NumJoysticks()
-    names = [_name_for_index(i) for i in range(count)]
-    wanted = cfg.profile if cfg.profile != "auto" else None
-    pick = None
-    for i, name in enumerate(names):       # 1. a device a profile names
-        p = choose(name, cfg.profile, all_profiles)
-        if p.id != "generic" and "windows" in p.sections and (p.matches(name) or wanted == p.id):
-            pick = (i, p)
-            break
-    if pick is None:                       # 2. anything that looks like a wheel
-        for i, name in enumerate(names):
-            if _looks_like_wheel(i, name):
-                pick = (i, choose(name, "auto", []))
-                break
-    if pick is None:
-        return None, None
-    joy = sdl2.SDL_JoystickOpen(pick[0])
-    if not joy:
-        return None, None
-    return SdlWheel(joy, pick[1]), pick[1]
+    found = []
+    for i in range(sdl2.SDL_NumJoysticks()):
+        inst = sdl2.SDL_JoystickGetDeviceInstanceID(i)
+        if inst in _open_instances:
+            continue
+        name = _name_for_index(i)
+        p_auto = choose(name, "auto", all_profiles)
+        is_profiled = p_auto.id != "generic" and "windows" in p_auto.sections
+        if not (is_profiled or _looks_like_wheel(i, name)):
+            continue
+        joy = sdl2.SDL_JoystickOpen(i)
+        if not joy:
+            continue
+        uid = _uid(joy, name, set(open_uids) | {w.uid for w in found})
+        wanted = S.wheel(uid).get("profile") or "auto"
+        p = choose(name, wanted, all_profiles)
+        if "windows" not in p.sections:
+            p = choose(name, "auto", [])
+        _open_instances.add(inst)
+        found.append(SdlWheel(joy, p, uid, inst))
+    return found
 
 
 def _direction(e_dir):
@@ -88,50 +109,77 @@ def _direction(e_dir):
 class SdlWheel:
     name = NAME
 
-    def __init__(self, joy, profile):
+    def __init__(self, joy, profile, uid, inst):
         self.joy = joy
+        self.uid = uid
+        self.inst = inst
+        self.profile = profile
         n = sdl2.SDL_JoystickName(joy)
         self.device_name = n.decode("utf-8", "replace") if n else "wheel"
-        self.state = WheelState()
         m = profile.platform("windows")
+        self.labels = {k[6:]: v for k, v in m.items() if k.startswith("label_")}
         rest = m.get("pedals_rest", "auto")
         naxes = sdl2.SDL_JoystickNumAxes(joy)
         self.axes = []                                    # (index, role, rest_high)
-        for role in AXIS_ROLES:
+        self.extra_labels = []
+        for role in AXIS_ROLES + EXTRA_AXES:
             idx = _num(m.get(role, ""), "axis")
             if idx is None or idx >= naxes:
                 continue
             value = sdl2.SDL_JoystickGetAxis(joy, idx)
-            rest_high = rest == "high" or (rest == "auto" and role != "steering" and value > 0)
+            pedal_like = role in AXIS_ROLES and role != "steering"
+            rest_high = pedal_like and (rest == "high" or (rest == "auto" and value > 0))
+            if role in EXTRA_AXES:
+                self.extra_labels.append(m.get(role + "_label", "Axis %s" % role[len("axis_extra"):]))
+                role = ("extra", len(self.extra_labels) - 1)
             self.axes.append((idx, role, rest_high))
+        self.state = WheelState(len(self.extra_labels))
         self.hat = _num(m.get("hat", "hat0"), "hat")
         if self.hat is not None and self.hat >= sdl2.SDL_JoystickNumHats(joy):
             self.hat = None
         nbuttons = sdl2.SDL_JoystickNumButtons(joy)
         self.buttons = {}                                 # index -> role
         if m.get("buttons") == "in_order":
-            roles = P.IN_ORDER_ROLES
-            for i in range(min(nbuttons, len(roles))):
-                self.buttons[i] = roles[i]
+            for i in range(min(nbuttons, len(P.IN_ORDER))):
+                self.buttons[i] = P.IN_ORDER[i]
         for role in ALL_BUTTON_ROLES:
             if role in m:
                 idx = _num(m[role], "button")
                 if idx is not None and idx < nbuttons:
                     self.buttons[idx] = role
         self.pressed = {}
-        self.has_shifter = any(r in P.GEAR_ROLES for r in self.buttons.values())
         # force feedback
         self.haptic = sdl2.SDL_HapticOpenFromJoystick(joy)
         q = sdl2.SDL_HapticQuery(self.haptic) if self.haptic else 0
         self.query = q
-        self.supported = {"spring": bool(q & sdl2.SDL_HAPTIC_SPRING),
-                          "const": bool(q & sdl2.SDL_HAPTIC_CONSTANT),
+        self.supported = {"spring": bool(q & sdl2.SDL_HAPTIC_SPRING), "const": bool(q & sdl2.SDL_HAPTIC_CONSTANT),
+                          "damper": bool(q & sdl2.SDL_HAPTIC_DAMPER), "friction": bool(q & sdl2.SDL_HAPTIC_FRICTION),
                           "vib": bool(q & sdl2.SDL_HAPTIC_SINE)}
         self.has_ffb = self.supported["spring"] or self.supported["const"]
-        self.ids = {"spring": None, "const": None, "vib": None}
-        self.last = {"spring": None, "const": None, "vib": None}
+        self.ids = {k: None for k in self.supported}
+        self.last = {k: None for k in self.supported}
         if self.haptic and q & sdl2.SDL_HAPTIC_AUTOCENTER:
             sdl2.SDL_HapticSetAutocenter(self.haptic, 0)
+
+    def describe(self):
+        roles = set(self.buttons.values())
+        axes = [a[1] for a in self.axes]
+        gears = [r for r in roles if r in P.GEARS and r != "reverse"]
+        if "shift_up" in roles and "shift_down" in roles and not gears:
+            shifter = "sequential"
+        elif gears:
+            shifter = "h%dr" % max(int(g[4:]) for g in gears) if "reverse" in roles else "h%d" % len(gears)
+        else:
+            shifter = "none"
+        forces = [n for n, k in (("constant", "const"), ("spring", "spring"), ("damper", "damper"),
+                                 ("friction", "friction"), ("rumble", "vib")) if self.supported[k]]
+        buttons = sorted(({"bit": P.BUTTONS[r][0], "role": r, "label": self.labels.get(r, P.BUTTONS[r][1])}
+                          for r in roles if r in P.BUTTONS), key=lambda b: b["bit"])
+        return {"pedals": [r for r in ("throttle", "brake", "clutch", "handbrake") if r in axes],
+                "shifter": shifter, "forces": forces, "ffb": self.has_ffb, "buttons": buttons,
+                "dpad": self.hat is not None or any(r in P.DPAD for r in roles),
+                "extra_axes": [{"role": "axis_extra%d" % (i + 1), "label": lab}
+                               for i, lab in enumerate(self.extra_labels)]}
 
     def fileno(self):
         return None        # polled
@@ -145,6 +193,8 @@ class SdlWheel:
             v = sdl2.SDL_JoystickGetAxis(self.joy, idx)
             if role == "steering":
                 st.steer = axis_centered(v, -32768, 32767)
+            elif isinstance(role, tuple):
+                st.extra[role[1]] = axis_unit(v, -32768, 32767)
             else:
                 setattr(st, role, pedal(v, -32768, 32767, rest_high))
         for idx, role in self.buttons.items():
@@ -154,8 +204,8 @@ class SdlWheel:
                 st.set_role(role, down)
         if self.hat is not None:
             h = sdl2.SDL_JoystickGetHat(self.joy, self.hat)
-            st.hat_x = (1 if h & sdl2.SDL_HAT_RIGHT else 0) - (1 if h & sdl2.SDL_HAT_LEFT else 0)
-            st.hat_y = (1 if h & sdl2.SDL_HAT_DOWN else 0) - (1 if h & sdl2.SDL_HAT_UP else 0)
+            st.set_hat((1 if h & sdl2.SDL_HAT_RIGHT else 0) - (1 if h & sdl2.SDL_HAT_LEFT else 0),
+                       (1 if h & sdl2.SDL_HAT_DOWN else 0) - (1 if h & sdl2.SDL_HAT_UP else 0))
 
     # ------------------------------------------------------------ force feedback
     def set_gain(self, gain):
@@ -169,8 +219,8 @@ class SdlWheel:
         if eid is None:
             eid = sdl2.SDL_HapticNewEffect(self.haptic, ctypes.byref(effect))
             if eid < 0:
-                print("this wheel refused the %s effect (%s); playing without it" % (
-                    name, sdl2.SDL_GetError().decode(errors="replace")), flush=True)
+                print("%s refused the %s effect (%s); playing without it" % (
+                    self.device_name, name, sdl2.SDL_GetError().decode(errors="replace")), flush=True)
                 self.supported[name] = False
                 return
             self.ids[name] = eid
@@ -194,32 +244,33 @@ class SdlWheel:
         for name in self.last:
             self.last[name] = None
 
-    def set_forces(self, spring, center, push, vib):
-        """spring 0..1, center -1..1, push -1..1 (positive turns right), vib 0..1."""
+    def _condition(self, name, etype, coef, center=0):
+        key = (coef, center)
+        if key == self.last[name]:
+            return
+        if coef > 0:
+            e = sdl2.SDL_HapticEffect()
+            e.type = etype
+            c = e.condition
+            c.type = etype
+            _direction(c.direction)
+            c.length = sdl2.SDL_HAPTIC_INFINITY
+            c.right_sat[0] = c.left_sat[0] = 0xFFFF
+            c.right_coeff[0] = c.left_coeff[0] = coef
+            c.center[0] = center
+            self._play(name, e)
+        else:
+            self._stop_one(name)
+        self.last[name] = key
+
+    def set_forces(self, constant, spring, center, damper, friction, rumble, period_ms):
         if not self.haptic:
             return
-        coef = int(spring * 32767)
-        center_ff = int(max(-1.0, min(1.0, center)) * 32767)
-        level = int(push * 32767)              # SDL's steering axis: positive pushes right
-        mag = int(vib * 32767)
-
-        key = (coef, center_ff)
-        if key != self.last["spring"]:
-            if coef > 0:
-                e = sdl2.SDL_HapticEffect()
-                e.type = sdl2.SDL_HAPTIC_SPRING
-                c = e.condition
-                c.type = sdl2.SDL_HAPTIC_SPRING
-                _direction(c.direction)
-                c.length = sdl2.SDL_HAPTIC_INFINITY
-                c.right_sat[0] = c.left_sat[0] = 0xFFFF
-                c.right_coeff[0] = c.left_coeff[0] = coef
-                c.center[0] = center_ff
-                self._play("spring", e)
-            else:
-                self._stop_one("spring")
-            self.last["spring"] = key
-
+        self._condition("spring", sdl2.SDL_HAPTIC_SPRING, int(spring * 32767),
+                        int(max(-1.0, min(1.0, center)) * 32767))
+        self._condition("damper", sdl2.SDL_HAPTIC_DAMPER, int(damper * 32767))
+        self._condition("friction", sdl2.SDL_HAPTIC_FRICTION, int(friction * 32767))
+        level = int(constant * 32767)              # SDL's steering axis: positive pushes right
         if level != self.last["const"]:
             if level != 0:
                 e = sdl2.SDL_HapticEffect()
@@ -233,8 +284,9 @@ class SdlWheel:
             else:
                 self._stop_one("const")
             self.last["const"] = level
-
-        if mag != self.last["vib"]:
+        mag = int(rumble * 32767)
+        key = (mag, int(period_ms))
+        if key != self.last["vib"]:
             if mag > 300:
                 e = sdl2.SDL_HapticEffect()
                 e.type = sdl2.SDL_HAPTIC_SINE
@@ -242,17 +294,18 @@ class SdlWheel:
                 p.type = sdl2.SDL_HAPTIC_SINE
                 _direction(p.direction)
                 p.length = sdl2.SDL_HAPTIC_INFINITY
-                p.period = 40
+                p.period = int(period_ms)
                 p.magnitude = mag
                 self._play("vib", e)
             else:
                 self._stop_one("vib")
-            self.last["vib"] = mag
+            self.last["vib"] = key
 
     def close(self):
         try:
             self.stop_forces()
         finally:
+            _open_instances.discard(self.inst)
             if self.haptic:
                 sdl2.SDL_HapticClose(self.haptic)
             sdl2.SDL_JoystickClose(self.joy)
