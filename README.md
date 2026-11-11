@@ -113,7 +113,9 @@ the box; some Thrustmaster and Fanatec models need an extra driver on Linux.
 
 ## For game developers
 
-[PROTOCOL.md](PROTOCOL.md) is the whole protocol: UDP, five small messages, frozen at version 1.
+**Protocol version 1 is being designed now** (several wheels and servers, passwords): see
+[pull request #1](https://github.com/IZImaster/NetXWheel/pull/1). Until NetXWheel 1.0 is out, this
+version (0.1, a prototype) speaks the [GT3W prototype protocol](PROTOCOL.md).
 Your game shows the network wheel as a normal wheel (for example an SDL virtual joystick) and sends
 its forces back. [clients/gt3-revisited](clients/gt3-revisited) is a complete client in C++ you can
 copy; `netxwheel test` and [netxwheel/testclient.py](netxwheel/testclient.py) show it from the game's side.

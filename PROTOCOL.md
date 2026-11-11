@@ -1,8 +1,11 @@
-# The NetXWheel protocol, version 1
+# The GT3W prototype protocol (NetXWheel 0.1)
+
+> This is the development prototype's protocol. NetXWheel 1.0 replaces it with **protocol version 1**
+> (several wheels and servers, passwords): see the `protocol-v2` branch. Don't build new games on this one.
 
 This is the fixed part of NetXWheel: anything that speaks it works with any NetXWheel server and any
 wheel the server supports. A game (the **client**) talks to the **server** next to the wheel.
-Version 1 is frozen: its messages and fields will not change (see [Keeping it compatible](#keeping-it-compatible)).
+
 
 A complete client in C++ is in [clients/gt3-revisited](clients/gt3-revisited) (about 260 lines),
 and a small one in Python is [netxwheel/testclient.py](netxwheel/testclient.py).

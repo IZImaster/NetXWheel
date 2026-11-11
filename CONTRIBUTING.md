@@ -24,6 +24,5 @@ Linux and Windows, add both a `[linux]` and a `[windows]` section (run make-prof
 - The server must stay simple to install and run: Python 3 standard library plus `python3-evdev`
   (Linux) or `pysdl2` (Windows). No new dependencies without a good reason.
 - Wheel-specific things go in profiles, not in code.
-- The protocol is frozen at version 1: read "Keeping it compatible" in PROTOCOL.md before changing
-  anything that goes over the network.
+- The protocol: version 1 is being designed in pull request #1; comments welcome there.
 - Run the tests before a pull request: `python3 tests/run_tests.py` (no wheel needed).
