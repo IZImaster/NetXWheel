@@ -1,10 +1,11 @@
-# The NetXWheel protocol, version 2 (draft for review)
+# The NetXWheel protocol, version 1 (draft for review)
 
 A game (the **client**) uses steering wheels plugged into another machine (the **server**) over the
 local network. One server can have several wheels of different makes; one network can have several
 servers; several games can each use their own wheel at the same time.
 
-Status: **draft**. Version 1 is retired (servers speak only version 2).
+Status: **draft**, to be frozen with NetXWheel 1.0. (The earlier `GT3W` prototype protocol, used
+only during development with GT3 Revisited, is not part of NetXWheel 1.0.)
 
 ## Contents
 
@@ -38,7 +39,7 @@ Every packet starts with this **16-byte header**:
 
 | Offset | Field | Type | Notes |
 |---|---|---|---|
-| 0 | magic | 4 bytes | `NXW2` |
+| 0 | magic | 4 bytes | `NXW1` |
 | 4 | type | u8 | see the table below |
 | 5 | flags | u8 | bit 0: the packet ends with a 16-byte **signature** (see 5); other bits 0 |
 | 6 | reserved | u16 | 0 |
@@ -71,14 +72,14 @@ player typed), for example once when its menu opens and then every 2 seconds whi
 Asking connects to nothing.
 
 ```json
-{"proto": 2, "client": "GT3 Revisited 1.4 (Quest 3)"}
+{"proto": 1, "client": "GT3 Revisited 1.4 (Quest 3)"}
 ```
 
 Every server answers with **ANNOUNCE** to the address the DISCOVER came from:
 
 ```json
 {
-  "proto": 2,
+  "proto": 1,
   "server_id": "6f1c2a90e4b84c31",
   "name": "Living room Pi",
   "software": "NetXWheel 2.0.0",
@@ -122,7 +123,7 @@ small. The game shows the servers and their wheels, and the player picks one.
 **1. CONNECT** (game → server):
 
 ```json
-{"proto": 2, "wheel": 1, "client": "GT3 Revisited 1.4 (Quest 3)", "client_nonce": "9a41...(32 hex)"}
+{"proto": 1, "wheel": 1, "client": "GT3 Revisited 1.4 (Quest 3)", "client_nonce": "9a41...(32 hex)"}
 ```
 
 `client_nonce` is 16 random bytes in hex, new for every attempt.
@@ -140,7 +141,7 @@ every time. The game asks the player for the passwords that are `true` (or uses 
 **3. CONNECT again**, now with the proof (see 5):
 
 ```json
-{"proto": 2, "wheel": 1, "client": "GT3 Revisited 1.4 (Quest 3)", "client_nonce": "9a41...",
+{"proto": 1, "wheel": 1, "client": "GT3 Revisited 1.4 (Quest 3)", "client_nonce": "9a41...",
  "nonce": "d03b...", "proof": "77c2...(64 hex)", "state_hz": 100}
 ```
 
@@ -315,7 +316,7 @@ H-shifter gears are in STATE `gear`, not in `buttons`.
 - Binary messages: fields may be **added at the end**; readers accept longer packets and ignore
   the rest. Reserved bytes and unused flag bits are 0.
 - New message types may be added; readers ignore types they don't know.
-- Only a change that can't be made that way gets a new version (`NXW3`), and the `proto`
+- Only a change that can't be made that way gets a new version (`NXW2`), and the `proto`
   field in DISCOVER/CONNECT lets a server answer each game in a version it speaks.
 
 ## 10. A whole session, step by step
@@ -335,4 +336,4 @@ game                                        server "Living room Pi"
 ```
 
 Example code: [clients/](clients/) (a game client in C++) and [netxwheel/testclient.py](netxwheel/testclient.py)
-(Python), once version 2 is built.
+(Python), once this version is built.
