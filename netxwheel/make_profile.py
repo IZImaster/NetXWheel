@@ -8,7 +8,7 @@ import re
 import sys
 import time
 
-from . import profiles, protocol as P
+from . import profiles
 
 LINUX = sys.platform.startswith("linux")
 
@@ -24,8 +24,13 @@ BUTTON_PROMPTS = [
     ("rsb", "the right stick / R3 button (if the wheel has one)"),
     ("lsb", "the left stick / L3 button (if the wheel has one)"),
     ("home", "the home / Xbox / PS / logo button"),
+    ("l2", "the L2 button (if the wheel has one)"),
+    ("r2", "the R2 button (if the wheel has one)"),
+    ("plus", "the + button (if the wheel has one)"),
+    ("minus", "the - button (if the wheel has one)"),
+    ("enter", "the Enter / dial press button (if the wheel has one)"),
 ]
-SHIFTER_PROMPTS = [("gear%d" % g, "put the shifter in gear %d" % g) for g in range(1, 7)] + [
+SHIFTER_PROMPTS = [("gear%d" % g, "put the shifter in gear %d" % g) for g in range(1, 8)] + [
     ("reverse", "put the shifter in REVERSE")]
 DPAD_PROMPTS = [("dpad_up", "press the D-pad UP"), ("dpad_down", "press the D-pad DOWN"),
                 ("dpad_left", "press the D-pad LEFT"), ("dpad_right", "press the D-pad RIGHT")]
@@ -230,7 +235,8 @@ def main():
 
     rest_high = None
     for step, role, what in ((2, "throttle", "the THROTTLE (gas) pedal"), (3, "brake", "the BRAKE pedal"),
-                             (4, "clutch", "the CLUTCH pedal (Enter, then leave it, if there's none)")):
+                             (4, "clutch", "the CLUTCH pedal (Enter, then leave it, if there's none)"),
+                             (5, "handbrake", "the HANDBRAKE (Enter, then leave it, if there's none)")):
         print("\n%d. Press %s all the way down and let go, a couple of times." % (step, what))
         input("   Press Enter to start... ")
         code, span, start = countdown_axes(reader, 5, used)
@@ -244,7 +250,7 @@ def main():
         print("   %s: %s" % (role, m[role]))
     m["pedals_rest"] = "high" if rest_high else "low"
 
-    print("\n5. BUTTONS: press each one when asked (press Enter to skip one the wheel doesn't have).")
+    print("\n6. BUTTONS: press each one when asked (press Enter to skip one the wheel doesn't have).")
     for role, prompt in BUTTON_PROMPTS:
         print("   %s ... " % prompt, end="", flush=True)
         got = wait_button(reader)
@@ -254,7 +260,7 @@ def main():
         else:
             print("skipped")
 
-    print("\n6. D-PAD:")
+    print("\n7. D-PAD:")
     for role, prompt in DPAD_PROMPTS:
         print("   %s ... " % prompt, end="", flush=True)
         got = wait_button(reader)
@@ -272,7 +278,7 @@ def main():
         else:
             print("skipped")
 
-    if input("\n7. Do you have an H-shifter (gear stick with gears 1-6 and R)? [y/N] ").strip().lower().startswith("y"):
+    if input("\n8. Do you have an H-shifter (gear stick with gears and R)? Gear 7 can be skipped. [y/N] ").strip().lower().startswith("y"):
         for role, prompt in SHIFTER_PROMPTS:
             print("   %s ... " % prompt, end="", flush=True)
             got = wait_button(reader)
@@ -282,22 +288,37 @@ def main():
             else:
                 print("skipped")
 
-    rot = input("\n8. How many degrees does the wheel turn from full left to full right? [900] ").strip()
+    rot = input("\n9. How many degrees does the wheel turn from full left to full right? [900] ").strip()
     try:
         rotation = int(float(rot)) if rot else 900
     except ValueError:
         rotation = 900
     reader.close()
 
+    vendor = input("\n10. The wheel's make, e.g. Logitech: ").strip()
+    model = input("   and model, e.g. G29: ").strip()
+    dd = input("   Is it a direct drive wheel? [y/N] ").strip().lower().startswith("y")
+    torque = input("   Its strongest force in Nm, if you know it (Enter to skip): ").strip()
+    try:
+        torque = "%g" % float(torque.replace(",", ".")) if torque else ""
+    except ValueError:
+        torque = ""
     name = reader.name
     words = [w for w in re.split(r"[^A-Za-z0-9]+", name) if w and w.lower() not in (
         "logitech", "thrustmaster", "fanatec", "racing", "wheel", "driving", "force", "inc", "usb")]
     match = " ".join(words[:2]) or name
     os.makedirs(profiles.user_dir(), exist_ok=True)
     file = os.path.join(profiles.user_dir(), slug(name) + ".ini")
-    lines = ["; Made with netxwheel make-profile.", "", "[wheel]", "name = %s" % name,
-             "match = %s" % match, "rotation = %d" % rotation, "tested = no", "", "[%s]" % reader.kind]
-    order = ["steering", "throttle", "brake", "clutch", "pedals_rest", "hat"] + [
+    lines = ["; Made with netxwheel make-profile.", "", "[wheel]", "name = %s" % name]
+    if vendor:
+        lines.append("vendor = %s" % vendor)
+    if model:
+        lines.append("model = %s" % model)
+    lines += ["match = %s" % match, "rotation = %d" % rotation, "direct_drive = %s" % ("yes" if dd else "no")]
+    if torque:
+        lines.append("torque_nm = %s" % torque)
+    lines += ["tested = no", "", "[%s]" % reader.kind]
+    order = ["steering", "throttle", "brake", "clutch", "handbrake", "pedals_rest", "hat"] + [
         r for r, _ in BUTTON_PROMPTS + DPAD_PROMPTS + SHIFTER_PROMPTS]
     for role in order:
         if role in m:

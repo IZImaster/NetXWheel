@@ -4,8 +4,12 @@ A profile says how to find the wheel and which of its axes and buttons are which
 
     [wheel]
     name = Logitech G920 Driving Force
+    vendor = Logitech
+    model = G920 Driving Force
     match = G920              # words in the device's name; "|" separates alternatives
     rotation = 900            # the wheel's own rotation, lock-to-lock, in degrees
+    direct_drive = no
+    torque_nm = 2.3           # the strongest force (leave out if unknown)
 
     [linux]                   # evdev names or numbers (netxwheel make-profile writes this for you)
     steering = ABS_X
@@ -30,8 +34,9 @@ from . import protocol, settings
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHIPPED = os.path.join(HERE, "profiles")
-AXIS_ROLES = ["steering", "throttle", "brake", "clutch"]
-ALL_BUTTON_ROLES = list(protocol.BUTTON_BIT) + protocol.DPAD_ROLES
+AXIS_ROLES = ["steering", "throttle", "brake", "clutch", "handbrake"]
+EXTRA_AXES = ["axis_extra%d" % i for i in range(1, 9)]       # dials, sliders...
+ALL_BUTTON_ROLES = list(protocol.BUTTONS) + list(protocol.GEARS) + list(protocol.DPAD)
 
 # Used for a wheel with no profile: steering on the first axis, pedals on the next ones,
 # pedals' resting end found when the server starts, buttons in order.
@@ -56,6 +61,13 @@ class Profile:
         except ValueError:
             self.rotation = 900
         self.tested = w.get("tested", "no")
+        self.vendor = w.get("vendor", "")
+        self.model = w.get("model", "")
+        self.direct_drive = w.get("direct_drive", "no").strip().lower() in ("yes", "true", "1", "on")
+        try:
+            self.torque_nm = float(w["torque_nm"]) if w.get("torque_nm") else None
+        except ValueError:
+            self.torque_nm = None
         self.sections = sections
 
     def platform(self, name):
@@ -128,6 +140,12 @@ def validate(file):
             problems.append("[wheel] has no name")
         if not s["wheel"].get("match"):
             problems.append("[wheel] has no match (words in the wheel's device name)")
+        tq = s["wheel"].get("torque_nm")
+        if tq:
+            try:
+                float(tq)
+            except ValueError:
+                problems.append("[wheel] torque_nm is not a number")
         try:
             r = int(float(s["wheel"].get("rotation", "900")))
             if not 90 <= r <= 2520:
@@ -136,9 +154,13 @@ def validate(file):
             problems.append("[wheel] rotation is not a number")
     if "linux" not in s and "windows" not in s:
         problems.append("needs a [linux] or [windows] section")
-    known = set(AXIS_ROLES) | set(ALL_BUTTON_ROLES) | {"pedals_rest", "buttons", "hat"}
+    known = set(AXIS_ROLES) | set(EXTRA_AXES) | set(ALL_BUTTON_ROLES) | {"pedals_rest", "buttons", "hat"}
     for plat in ("linux", "windows"):
         for key, value in s.get(plat, {}).items():
+            if key.startswith("label_") and (key[6:] in known):
+                continue
+            if key.startswith("axis_extra") and key.endswith("_label") and key[:-6] in EXTRA_AXES:
+                continue
             if key not in known:
                 problems.append("[%s] %s is not a known role" % (plat, key))
             if key == "pedals_rest" and value not in ("auto", "high", "low"):

@@ -1,23 +1,38 @@
-# Client example: GT3 Revisited (C++, SDL3)
+# Client example: GT3 Revisited (C++)
 
-`net_wheel.h` and `net_wheel.cpp` are the NetXWheel client from GT3 Revisited
-([its fork with the network wheel](https://github.com/IZImaster/GT3-revisited-Steering-Wheel-FFB/tree/netwheel),
-files `src/input/net_wheel.*`). Copied here as a reference for adding NetXWheel to another game.
+The NetXWheel client from GT3 Revisited
+([its fork with the network wheel](https://github.com/IZImaster/GT3-revisited-Steering-Wheel-FFB/tree/netxwheel-v1),
+`src/input/`), copied here as a reference for adding NetXWheel to another game.
 
-What it does:
+- **`netxwheel.h` / `netxwheel.cpp`**: the whole protocol (version 1), no SDL: finding servers
+  (DISCOVER / ANNOUNCE), connecting with passwords (CHALLENGE, PBKDF2 + HMAC proof, checking the
+  signed ACCEPT, ignoring answers that aren't for us), the signed session (STATE, FORCES,
+  KEEPALIVE, NOTICE, BYE), reconnecting by itself, and a rumble to identify the wheel.
+  Plain sockets (Windows, Linux, macOS, Android). It uses the game's SHA-256 / HMAC / PBKDF2
+  (`base/sha256.h`) and JSON reader (`formats/json.h`): swap in your own.
+- **`net_wheel.h` / `net_wheel.cpp`**: the game side: the connected wheel becomes an **SDL virtual
+  joystick** (SDL3 `SDL_AttachVirtualJoystick`, type wheel) so the rest of the game sees an
+  ordinary wheel, and the race's forces go back to the server.
 
-- Opens a UDP socket and sends HELLO once a second, to `255.255.255.255:27920` (auto) or to a set
-  address. The first server that answers is used from then on.
-- On HELLO_ACK it attaches an **SDL virtual joystick** with 4 axes (steering, gas, brake, clutch),
-  19 buttons and a hat, so the rest of the game sees an ordinary wheel: bindings, menus and force
-  settings work unchanged.
-- On STATE it sets the virtual joystick's axes, buttons and hat (dropping out-of-order packets).
-- `send_force()` sends the game's spring and steering force (FFB) every frame while racing.
-- If nothing arrives for 2 seconds the virtual wheel is detached (like unplugging a wheel); it comes
-  back by itself when the server answers again.
+Usage, once per frame:
 
-The game-specific parts are small: the button order of the virtual joystick (`kButtonMap`), the
-logging macro and the namespace. In the game, `InputManager` creates it from `config.ini`
-(`[netwheel] enabled / host / port`) and Settings > Controls > Network wheel.
+```cpp
+netxwheel::Client c;
+c.open();
+c.discover();                    // every couple of seconds while a menu lists servers
+c.poll();                        // reads answers: c.servers()
+netxwheel::Target t;             // the player's choice
+t.ip = s.ip; t.port = s.port; t.wheel = 1; t.server_id = s.server_id; t.server_password = "...";
+c.connect(t);
+// every frame:
+c.poll();
+netxwheel::WheelState st;
+if (c.take_state(st)) { /* steering, pedals, buttons, gear */ }
+c.send_forces({true, constant, spring});  // while racing
+c.identify(2.0);                 // rumble to find the wheel
+```
+
+The game's tests (`tests/test_netxwheel.cpp` there) check its keys against the Python server's and
+run a whole session against a small server.
 
 Licence: GT3 Revisited's MIT licence, in [LICENSE](LICENSE) here.
